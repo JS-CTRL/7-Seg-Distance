@@ -1,0 +1,357 @@
+//***************************************************************************************
+// Class: ECGR-5101: Grad-Code
+// Authors: Jeromey Schwartz, Chizuram Nwosu
+// Date: 12/10/21
+// History: First Revision
+// Purpose: Create a device to measure distance with an ultrasonic sensor and
+//          display that measurement on 7-segment LEDs.
+// Setup:
+//      MSP430 chip connected to an ultrasonic sensor, 7-segment LEDs, press-buttons
+//      switch, power conversion circuitry, and a power source.
+//Credit: Used code by drselim as reference for setting up timers for ultrasonic 
+//        https://www.instructables.com/MSP430-HC-SR04-Ultrasonic-Sensor/
+// Functions:
+//    void configureTimers(void);         //Sets up timers for PWM and Capture&Compare
+//    void configureGPIO(void);           //Configures Inputs and Outputs
+//    void configureButton();             // Configure button as active low
+//    void set_m(unsigned int in);        // Display meter value
+//    void set_cm(unsigned int in);       // Display centimeter value
+//    void set_mm(unsigned int in);       // Display millimeter value
+//***************************************************************************************
+#include <msp430.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <math.h>
+
+
+// Function Prototypes
+void configureTimers(void);         //Sets up timers for PWM and Capture&Compare
+void configureGPIO(void);           //Configures Inputs and outputs
+void configureButton(void);         // Configure button as active low
+void set_m(unsigned int in);        // Display meter value
+void set_cm(unsigned int in);       // Display centimeter value
+void set_mm(unsigned int in);       // Display millimeter value
+
+// Declaring variables
+volatile int temp[2]; //holds interrupt time variables
+volatile float diff; //holds echo pulse length
+volatile int distance; //distance in cm
+unsigned int i=0; //used in timer interrupt
+unsigned int mm; 
+unsigned int cm; 
+unsigned int cm1; //intermediate variable holder
+unsigned int m;
+bool buttonState = true; //button state is paused or running true=running
+
+void main(void)
+{
+   WDTCTL = WDTPW | WDTHOLD;    // Stop watchdog timer
+   BCSCTL1 = CALBC1_1MHZ;   //set clock freq
+   DCOCTL = CALDCO_1MHZ;    //set clock freq
+   configureTimers();
+   configureGPIO();
+   configureButton();
+   _enable_interrupts();
+
+   while (1)
+   {
+       if (buttonState == 1) //Button state 0 = pause, 1 means not paused
+       {
+           // calculate distance in cm from pulse length
+           distance = abs(diff/58);
+           
+           //seperate full distance to m, cm and mm
+           m = distance/100;
+           cm1 = (distance%100);
+           cm = cm1/10;
+           mm = (distance%100)%10;
+           
+           //display distances on respective 7-segs
+           set_m(m);
+           set_mm(mm);
+           set_cm(cm);
+           
+           //arbirtrary delay to slow down screen refresh rate
+           __delay_cycles(1111111);
+       }
+   }//end while
+
+}//end main
+
+
+//***************************************************************************************
+// Function Name: configureTimers(void)
+// Authors: Jeromey Schwartz, Chizuram Nwosu
+// Date: 12/10/21
+// History: First Revision
+// Purpose: Configure registers to create a pwm for the echo pin, as well as using
+//          capture and compare to determine trigger pulse length
+// Method: setting registers 
+// Inputs/Outputs: Input-void
+//                 Output- void
+//***************************************************************************************
+void configureTimers(void)
+{
+    TA0CTL = TASSEL_2|MC_1 ;
+    TA0CCR0 = 0xFFFF;  //pwm period 65535
+    TA0CCR1 = 0x000A;  //set duty cycle for pwm at 10us
+    TA0CCTL1 = OUTMOD_7;//output mode used for pwm
+    TA1CTL = TASSEL_2|MC_2 ;//smclock selected in continous mode 
+    TA1CCTL1 = CAP | CCIE | CCIS_0 | CM_3 | SCS ; //set capture mode for echo, capture
+                                                  //mode rise and fall
+}
+
+
+//***************************************************************************************
+// Function Name: congigureUltra(void)
+// Authors: Jeromey Schwartz, Chizuram Nwosu
+// Date: 12/10/21
+// History: First Revision
+// Purpose: Sets Echo pin to output, and trigger pin to output 
+// Method: setting registers
+// Inputs/Outputs: Input-void
+//                 Output- void
+//***************************************************************************************
+void congigureGPIO(void)
+{   
+    //sets all GPIOs, button and echo as input, everything else as output 
+    P2SEL = 0;  
+    P2SEL2 = 0;
+    P1DIR = 0x7F;   
+    P2DIR = 0xFD;  
+    P2SEL |= BIT1; //set input trig
+    P1SEL |= BIT6; //set output echo
+}
+
+
+//***************************************************************************************
+// Function Name: Button_Press_ISR(void)
+// Authors: Jeromey Schwartz, Chizuram Nwosu
+// Date: 12/10/21
+// History: First Revision
+// Purpose: Port 1 push button interrupt service routine, toggles button state when 
+//          button pressed
+// Method: If statements
+// Inputs/Outputs: Input-void
+//                 Output- void
+//***************************************************************************************
+#pragma vector=PORT1_VECTOR
+__interrupt void Button_Press_ISR(void)
+{
+    if (buttonState == 0)
+    {
+        buttonState = 1;
+    }
+    else if (buttonState == 1)
+    {
+        buttonState = 0;
+    }
+    __delay_cycles(1111111); //delay to act as software button debounce
+    P1IFG = 0;                 // Clear P1.1 IFG
+}
+
+//***************************************************************************************
+// Function Name: Timer_A(void)
+// Authors: Jeromey Schwartz, Chizuram Nwosu
+// Date: 12/10/21
+// History: First Revision
+// Purpose: Collecting measurements with timer interrupt service routine
+// Method: If statements
+// Inputs/Outputs: Input-void
+//                 Output- void
+//***************************************************************************************
+#pragma vector = TIMER1_A1_VECTOR
+__interrupt void Timer_A(void)
+{
+    temp[i] = TA1CCR1;      //saves time triggered as temp
+    i += 1;
+    TA1CCTL1 &= ~CCIFG ;
+    if (i == 2)
+    {
+        diff = temp[i-2] - temp[i-1]; //subtracts 2 triggered times to get pulse length
+        i = 0;
+    }
+}
+
+//***************************************************************************************
+// Function Name: set_mm(unsigned int in)
+// Authors: Jeromey Schwartz, Chizuram Nwosu
+// Date: 12/10/21
+// History: First Revision
+// Purpose: Display millimeter value
+// Method: switch-case function
+// Inputs/Outputs: Input-unsigned int in
+//                 Output- void
+//***************************************************************************************
+void set_mm(unsigned int in)
+{
+    unsigned int out;
+    P1OUT &= 0xF0;      //set bits 0-3 to zero
+//outputs the case, Case 0 outputs 0  
+    switch(in)
+    {
+        case 0:
+            out=0x00;
+            break;
+        case 1:
+            out=0x01;
+            break;
+        case 2:
+            out=0x02;
+            break;
+        case 3:
+            out=0x03;
+            break;
+        case 4:
+            out=0x04;
+            break;
+        case 5:
+            out=0x05;
+            break;
+        case 6:
+            out=0x06;
+            break;
+        case 7:
+            out=0x07;
+            break;
+        case 8:
+            out=0x08;
+            break;
+        case 9:
+            out=0x09;
+            break;
+        default:
+            out=0x00;
+    }
+
+    P1OUT |= out;
+}
+
+//***************************************************************************************
+// Function Name: set_m(unsigned int in)
+// Authors: Jeromey Schwartz, Chizuram Nwosu
+// Date: 12/10/21
+// History: First Revision
+// Purpose: Display meter value
+// Method: switch-case function
+// Inputs/Outputs: Input-unsigned int in
+//                 Output- void
+//***************************************************************************************
+void set_m(unsigned int in)
+{
+    unsigned int out;
+    P2OUT &= 0x0F;      //set bits 0-3 to zero
+//outputs the case, Case 0 outputs 0  
+    switch(in)
+    {
+        case 0:
+            out=0x00;
+            break;
+        case 1:
+            out=0x20;
+            break;
+        case 2:
+            out=0x40;
+            break;
+        case 3:
+            out=0x60;
+            break;
+        case 4:
+            out=0x80;
+            break;
+        case 5:
+            out=0xA0;
+            break;
+        case 6:
+            out=0xC0;
+            break;
+        case 7:
+            out=0xE0;
+            break;
+        default:
+            out=0x00;
+    }
+
+    P2OUT |= out;
+}
+
+//***************************************************************************************
+// Function Name: set_cm(unsigned int in)
+// Authors: Jeromey Schwartz, Chizuram Nwosu
+// Date: 12/10/21
+// History: First Revision
+// Purpose: Display centimeter value
+// Method: switch-case function
+// Inputs/Outputs: Input-unsigned int in
+//                 Output- void
+//***************************************************************************************
+void set_cm(unsigned int in)
+{
+    unsigned int out;
+    P2OUT &= 0xE2;      //set bits 0,2,3,4 to zero
+	//outputs the case, Case 0 outputs 0  
+    switch(in)
+    {
+        case 0:
+            out=0x00;
+            break;
+        case 1:
+            out=0x01;
+            break;
+        case 2:
+            out=0x04;
+            break;
+        case 3:
+            out=0x05;
+            break;
+        case 4:
+            out=0x08;
+            break;
+        case 5:
+            out=0x09;
+            break;
+        case 6:
+            out=0x0C;
+            break;
+        case 7:
+            out=0x0D;
+            break;
+        case 8:
+            out=0x10;
+            break;
+        case 9:
+            out=0x11;
+            break;
+        default:
+            out=0x00;
+    }
+
+    P2OUT |= out;
+}
+
+
+//***************************************************************************************
+// Function Name: configureButton()
+// Authors: Jeromey Schwartz, Chizuram Nwosu
+// Date: 12/10/21
+// History: First Revision
+// Purpose: Configure button registers, active low
+// Method: setting variables
+// Inputs/Outputs: Input-unsigned int in
+//                 Output- void
+//***************************************************************************************
+void configureButton()
+ {
+     P1IN   &=  ~BIT7;
+     P1OUT  &= BIT7;           // Pull-up resistor on P1.7
+     P1REN  |=  BIT7;          // Select pull-up mode for P1.7
+     P1DIR  &= ~BIT7;          // Set all but P1.1 to output direction
+     P1IES  =   BIT7;          // P1.1 Hi/Lo edge
+     P1IFG  =   0;             // Clear all P1 interrupt flags
+     P1IE   =   BIT7;          // P1.7 interrupt enabled
+     P1SEL  &= ~BIT7;
+     P1SEL2 &= ~BIT7;
+
+ }//end configureSevenSegDisp function
